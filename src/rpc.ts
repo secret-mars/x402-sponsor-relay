@@ -96,7 +96,14 @@ function projectRpcErrorCode(errorCode?: string): PublicRpcErrorCode | undefined
  */
 /** Result of RelayRPC.sponsorPayment(). */
 export type SponsorPaymentResult =
-  | { success: true; txid: string; payer: string; fee: string }
+  | {
+      success: true;
+      txid: string;
+      payer: string;
+      fee: string;
+      /** This tx was already sponsored earlier; nothing new was broadcast. Dedupe on txid. */
+      replayed?: boolean;
+    }
   | {
       success: false;
       code:
@@ -144,6 +151,15 @@ export class RelayRPC extends WorkerEntrypoint<Env> {
       return { success: false, code: "PAYMENT_MISMATCH", error: "Sender and recipient are the same address", retryable: false };
     }
 
+    // A resubmit of a tx already sponsored and landed (e.g. after a failure answer to a
+    // broadcast the node in fact took) gets that txid back. Checked before the rate limit and
+    // balance preflight: once the payment has landed, the sender may no longer pass either.
+    const prior = await sponsorService.findSponsored(validation.transaction);
+    if (prior) {
+      logger.info("Sponsored payment already broadcast, returning its txid", { txid: prior.txid, payer });
+      return { success: true, txid: prior.txid, payer, fee: prior.fee, replayed: true };
+    }
+
     if (this.env.SPONSOR_RATE_LIMIT) {
       const { success } = await this.env.SPONSOR_RATE_LIMIT.limit({ key: payer });
       if (!success) {
@@ -175,7 +191,7 @@ export class RelayRPC extends WorkerEntrypoint<Env> {
       };
     }
     logger.info("Sponsored payment broadcast", { txid: sent.txid, payer, fee: sent.fee, sponsorNonce: sent.sponsorNonce });
-    return { success: true, txid: sent.txid, payer, fee: sent.fee };
+    return { success: true, txid: sent.txid, payer, fee: sent.fee, ...(sent.replayed && { replayed: true }) };
   }
 
   /**
